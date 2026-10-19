@@ -1,0 +1,172 @@
+# Wöchentlicher iOS-Build von Forge für den eigenen Fork.
+#
+# Ablage im Fork: .github/workflows/ios-weekly.yml
+#
+# Was der Workflow macht:
+#  1. Prüft jeden Montag, ob es im Original (Card-Forge/forge) neue Commits gibt.
+#  2. Wenn ja: baut auf einem macOS-Runner eine unsignierte IPA aus dem
+#     aktuellen Upstream-Stand (der Fork selbst muss dafür nicht synchron sein).
+#  3. Macht Forges Datenordner zusätzlich in der iOS-Dateien-App sichtbar
+#     (für Spielstand-Übertragung zwischen Geräten).
+#  4. Veröffentlicht die IPA als GitHub-Release im Fork, plus eine
+#     SideStore/AltStore-Quelle, damit Updates direkt am iPhone gehen.
+#  5. Behält nur die letzten 3 iOS-Releases.
+#
+# Optional: Unter Settings → Secrets and variables → Actions → Variables
+# eine Variable FORGE_BUNDLE_ID anlegen, um die Bundle-ID zu ändern.
+
+name: iOS IPA (wöchentlich)
+
+on:
+  schedule:
+    - cron: '23 3 * * 1'   # Montags 03:23 UTC
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Auch bauen, wenn es keine neuen Upstream-Commits gibt'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ios-weekly
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: Card-Forge/forge
+  UPSTREAM_BRANCH: master
+  APP_ID: ${{ vars.FORGE_BUNDLE_ID || 'com.leograssl.forge' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.upstream.outputs.sha }}
+      short: ${{ steps.upstream.outputs.short }}
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - name: Neuesten Upstream-Commit ermitteln
+        id: upstream
+        run: |
+          sha=$(git ls-remote "https://github.com/${UPSTREAM}.git" "refs/heads/${UPSTREAM_BRANCH}" | cut -f1)
+          [ -n "$sha" ] || { echo "Upstream nicht erreichbar" >&2; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short=${sha:0:10}" >> "$GITHUB_OUTPUT"
+
+      - name: Schon gebaut?
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event.inputs.force || 'false' }}
+        run: |
+          tag="ios-${{ steps.upstream.outputs.short }}"
+          if [ "$FORCE" != "true" ] && gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag existiert bereits – nichts zu tun."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Upstream auschecken
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ needs.check.outputs.sha }}
+
+      - name: Java einrichten
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'maven'
+
+      - name: Cache Pipeline-Tools
+        uses: actions/cache@v5
+        with:
+          path: tmp/jvmdg/tools
+          key: jvmdg-tools-${{ hashFiles('forge-gui-ios/pipeline/ios-pipeline.sh') }}
+
+      - name: Cache RoboVM SDK + AOT
+        uses: actions/cache@v5
+        with:
+          path: ~/.robovm
+          key: robovm-${{ runner.os }}-${{ hashFiles('forge-gui-ios/pom.xml') }}
+
+      - name: Datenordner in der Dateien-App sichtbar machen
+        run: |
+          plist=forge-gui-ios/Info.plist.xml
+          if ! grep -q LSSupportsOpeningDocumentsInPlace "$plist"; then
+            # direkt hinter UIFileSharingEnabled einfügen
+            perl -0pi -e 's#(<key>UIFileSharingEnabled</key>\s*<true/>)#$1\n    <key>LSSupportsOpeningDocumentsInPlace</key>\n    <true/>#' "$plist"
+          fi
+          grep -A1 LSSupportsOpeningDocumentsInPlace "$plist"
+
+      - name: Unsignierte IPA bauen
+        run: SKIP_CACHE_CLEAR=1 bash forge-gui-ios/pipeline/ios-pipeline.sh ipa
+
+      - name: IPA und SideStore-Quelle vorbereiten
+        id: prep
+        run: |
+          src=$(ls forge-gui-ios/target/robovm/*.ipa | head -1)
+          [ -f "$src" ] || { echo "Keine IPA gefunden" >&2; exit 1; }
+          mkdir -p out
+          cp "$src" out/forge-ios.ipa
+          size=$(stat -f%z out/forge-ios.ipa)
+          tag="ios-${{ needs.check.outputs.short }}"
+          version=$(date -u +%Y.%m.%d)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          cat > out/forge-source.json <<EOF
+          {
+            "name": "Forge (eigener Build)",
+            "identifier": "${APP_ID}.source",
+            "apps": [
+              {
+                "name": "Forge",
+                "bundleIdentifier": "${APP_ID}",
+                "developerName": "Card-Forge (inoffiziell, eigener Build)",
+                "localizedDescription": "Inoffizielle Magic: The Gathering Rules Engine. Wöchentlicher Build aus ${UPSTREAM}@${{ needs.check.outputs.short }}.",
+                "iconURL": "https://raw.githubusercontent.com/${UPSTREAM}/${{ needs.check.outputs.sha }}/AppIcon.png",
+                "versions": [
+                  {
+                    "version": "${version}",
+                    "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                    "downloadURL": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/forge-ios.ipa",
+                    "size": ${size},
+                    "minOSVersion": "16.0"
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          python3 -m json.tool out/forge-source.json > /dev/null
+
+      - name: Release veröffentlichen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.prep.outputs.tag }}"
+          gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
+          gh release create "$tag" out/forge-ios.ipa out/forge-source.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Forge iOS ${{ steps.prep.outputs.version }}" \
+            --notes "Unsignierter iOS-Build aus ${UPSTREAM}@${{ needs.check.outputs.sha }}. Mit Sideloadly/Sideloader oder SideStore signieren und installieren." \
+            --latest
+
+      - name: Alte iOS-Releases aufräumen (letzte 3 behalten)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+            -q 'sort_by(.createdAt) | reverse | .[].tagName' \
+            | grep '^ios-' | tail -n +4 \
+            | xargs -r -n1 gh release delete --repo "$GITHUB_REPOSITORY" --cleanup-tag -y
