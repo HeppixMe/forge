@@ -1,0 +1,112 @@
+# Repariert die SideStore/AltStore-Quelle eines bereits gebauten iOS-Releases,
+# OHNE die IPA neu zu bauen (läuft auf einem günstigen Ubuntu-Runner).
+#
+# Hintergrund: AltStore/SideStore lehnen die Installation mit
+# "VerificationError 4 – downloaded version does not match the version
+# specified by the source" ab, wenn das Feld `version` in der forge-source.json
+# nicht exakt der CFBundleShortVersionString der IPA entspricht.
+#
+# Dieser Workflow lädt die vorhandene IPA des neuesten (oder angegebenen)
+# ios-*-Releases, liest deren echte Version aus und erzeugt die
+# forge-source.json passend neu und ersetzt sie im Release.
+
+name: iOS-Quelle reparieren (ohne Neubau)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release-Tag (leer = neuestes ios-* Release)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ios-fix-source
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: Card-Forge/forge
+  APP_ID: ${{ vars.FORGE_BUNDLE_ID || 'com.leograssl.forge' }}
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ziel-Release ermitteln
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+              -q 'sort_by(.createdAt) | reverse | .[].tagName' | grep '^ios-' | head -1)
+          fi
+          [ -n "$tag" ] || { echo "Kein ios-* Release gefunden" >&2; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "short=${tag#ios-}" >> "$GITHUB_OUTPUT"
+
+      - name: IPA laden und echte Version lesen
+        id: info
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.rel.outputs.tag }}"
+          mkdir -p dl
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern 'forge-ios.ipa' --dir dl
+          size=$(stat -c%s dl/forge-ios.ipa)
+          ipa_plist=$(unzip -Z1 dl/forge-ios.ipa | grep -E '^Payload/[^/]+/Info.plist$' | head -1)
+          unzip -p dl/forge-ios.ipa "$ipa_plist" > Info.plist
+          version=$(python3 -I - <<'PY'
+          import plistlib
+          with open('Info.plist', 'rb') as f:
+              print(plistlib.load(f)['CFBundleShortVersionString'])
+          PY
+          )
+          [ -n "$version" ] || { echo "CFBundleShortVersionString nicht lesbar" >&2; exit 1; }
+          echo "size=$size" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: forge-source.json neu erzeugen
+        run: |
+          tag="${{ steps.rel.outputs.tag }}"
+          short="${{ steps.rel.outputs.short }}"
+          version="${{ steps.info.outputs.version }}"
+          size="${{ steps.info.outputs.size }}"
+          mkdir -p out
+          cat > out/forge-source.json <<EOF
+          {
+            "name": "Forge (eigener Build)",
+            "identifier": "${APP_ID}.source",
+            "apps": [
+              {
+                "name": "Forge",
+                "bundleIdentifier": "${APP_ID}",
+                "developerName": "Card-Forge (inoffiziell, eigener Build)",
+                "localizedDescription": "Inoffizielle Magic: The Gathering Rules Engine. Build aus ${UPSTREAM}@${short}.",
+                "iconURL": "https://raw.githubusercontent.com/${UPSTREAM}/master/AppIcon.png",
+                "versions": [
+                  {
+                    "version": "${version}",
+                    "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                    "downloadURL": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/forge-ios.ipa",
+                    "size": ${size},
+                    "minOSVersion": "16.0"
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          python3 -m json.tool out/forge-source.json > /dev/null
+          echo "Neue Quelle: version=${version}, tag=${tag}"
+
+      - name: Asset im Release ersetzen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.rel.outputs.tag }}" out/forge-source.json \
+            --repo "$GITHUB_REPOSITORY" --clobber

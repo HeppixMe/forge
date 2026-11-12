@@ -109,6 +109,18 @@ jobs:
           fi
           grep -A1 LSSupportsOpeningDocumentsInPlace "$plist"
 
+      - name: App-Version datumsbasiert setzen (eindeutig je Build)
+        run: |
+          # AltStore/SideStore lehnen die Installation ab, wenn die Version in
+          # der Quelle nicht exakt der CFBundleShortVersionString der IPA
+          # entspricht. Außerdem ändert sich Forges Marketing-Version nur
+          # selten, sodass AltStore sonst neue Builds nicht als Update erkennt.
+          # Darum backen wir eine datumsbasierte, monoton steigende Version ein.
+          tmpl=forge-gui-ios/robovm.properties.template
+          ver=$(date -u +%Y.%m.%d)
+          sed -i '' -E "s/^app\.version=.*/app.version=${ver}/" "$tmpl"
+          grep -E '^app\.(version|build)=' "$tmpl"
+
       - name: Unsignierte IPA bauen
         run: SKIP_CACHE_CLEAR=1 bash forge-gui-ios/pipeline/ios-pipeline.sh ipa
 
@@ -121,7 +133,12 @@ jobs:
           cp "$src" out/forge-ios.ipa
           size=$(stat -f%z out/forge-ios.ipa)
           tag="ios-${{ needs.check.outputs.short }}"
-          version=$(date -u +%Y.%m.%d)
+          # Version EXAKT aus der IPA lesen, damit die Quelle garantiert passt
+          # (sonst AltStore VerificationError 4).
+          ipa_plist=$(unzip -Z1 out/forge-ios.ipa | grep -E '^Payload/[^/]+/Info.plist$' | head -1)
+          unzip -p out/forge-ios.ipa "$ipa_plist" > ipa-info.plist
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' ipa-info.plist)
+          [ -n "$version" ] || { echo "CFBundleShortVersionString nicht lesbar" >&2; exit 1; }
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           cat > out/forge-source.json <<EOF
@@ -149,6 +166,10 @@ jobs:
           }
           EOF
           python3 -m json.tool out/forge-source.json > /dev/null
+          # Sicherstellen, dass Quelle und IPA dieselbe Version tragen.
+          json_ver=$(python3 -c "import json;print(json.load(open('out/forge-source.json'))['apps'][0]['versions'][0]['version'])")
+          [ "$json_ver" = "$version" ] || { echo "Versions-Mismatch: json=$json_ver ipa=$version" >&2; exit 1; }
+          echo "Quelle-Version: $json_ver (passt zur IPA)"
 
       - name: Release veröffentlichen
         env:
