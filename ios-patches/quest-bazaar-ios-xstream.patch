@@ -1,0 +1,43 @@
+diff --git a/forge-gui/src/main/java/forge/gamemodes/quest/bazaar/QuestBazaarManager.java b/forge-gui/src/main/java/forge/gamemodes/quest/bazaar/QuestBazaarManager.java
+index e3f4bed788c..9886d5e32b4 100644
+--- a/forge-gui/src/main/java/forge/gamemodes/quest/bazaar/QuestBazaarManager.java
++++ b/forge-gui/src/main/java/forge/gamemodes/quest/bazaar/QuestBazaarManager.java
+@@ -84,6 +84,38 @@ public class QuestBazaarManager {
+             });
+             xs.autodetectAnnotations(true);
+ 
++            // MobiVM/RoboVM AOT does not expose XStream's runtime annotations,
++            // so @XStreamAsAttribute / @XStreamAlias are silently ignored and
++            // every attribute field (e.g. a stall's name) deserializes as null
++            // -> TreeMap.put throws an NPE and Quest mode cannot open on iOS.
++            // Register the same mappings programmatically so the bazaar loads
++            // identically on desktop and iOS.
++            xs.useAttributeFor(QuestStallDefinition.class, "name");
++            xs.useAttributeFor(QuestStallDefinition.class, "displayName");
++            xs.useAttributeFor(QuestStallDefinition.class, "icon");
++
++            xs.useAttributeFor(QuestItemBasic.class, "itemType");
++            xs.useAttributeFor(QuestItemBasic.class, "maxLevel");
++            xs.useAttributeFor(QuestItemBasic.class, "purchaseName");
++            xs.useAttributeFor(QuestItemBasic.class, "basePrice");
++            xs.useAttributeFor(QuestItemBasic.class, "icon");
++
++            xs.useAttributeFor(QuestPetController.class, "maxLevel");
++            xs.useAttributeFor(QuestPetController.class, "name");
++            xs.useAttributeFor(QuestPetController.class, "saveFileKey");
++            xs.useAttributeFor(QuestPetController.class, "slot");
++            xs.aliasField("desc", QuestPetController.class, "description");
++
++            xs.alias("level", QuestPetStats.class);
++            xs.useAttributeFor(QuestPetStats.class, "levelValue");
++            xs.aliasField("value", QuestPetStats.class, "levelValue");
++            xs.useAttributeFor(QuestPetStats.class, "picture");
++            xs.aliasField("pic", QuestPetStats.class, "picture");
++            xs.useAttributeFor(QuestPetStats.class, "stats");
++            xs.useAttributeFor(QuestPetStats.class, "cardFile");
++            xs.useAttributeFor(QuestPetStats.class, "cost");
++            xs.useAttributeFor(QuestPetStats.class, "nextLevel");
++
+             final NodeList xmlStalls = document.getElementsByTagName("stalls").item(0).getChildNodes();
+             for (int iN = 0; iN < xmlStalls.getLength(); iN++) {
+                 final Node n = xmlStalls.item(iN);

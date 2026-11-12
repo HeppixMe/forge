@@ -81,6 +81,22 @@ jobs:
           repository: ${{ env.UPSTREAM }}
           ref: ${{ needs.check.outputs.sha }}
 
+      - name: iOS-Fixes auf Upstream anwenden
+        env:
+          PATCH_REF: ${{ github.sha }}
+        run: |
+          # Der Build checkt Upstream (Card-Forge/forge) aus. Eigene Fixes
+          # liegen als Patches im Fork und werden hier daraufgelegt – ohne den
+          # Fork synchron halten zu müssen und ohne Upstream etwas zu pushen.
+          base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${PATCH_REF}/ios-patches"
+          for name in quest-bazaar-ios-xstream.patch; do
+            echo "== Patch: $name =="
+            curl -fsSL -o "/tmp/$name" "$base/$name"
+            git apply --3way --whitespace=nowarn "/tmp/$name" \
+              || { echo "::error::Patch '$name' ließ sich nicht anwenden (Upstream geändert?) – Patch aktualisieren." >&2; exit 1; }
+          done
+          echo "Alle iOS-Fix-Patches angewendet."
+
       - name: Java einrichten
         uses: actions/setup-java@v5
         with:
