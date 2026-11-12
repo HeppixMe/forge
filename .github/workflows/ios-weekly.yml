@@ -1,9 +1,9 @@
-# Täglicher iOS-Build von Forge für den eigenen Fork.
+# Wöchentlicher iOS-Build von Forge für den eigenen Fork.
 #
 # Ablage im Fork: .github/workflows/ios-weekly.yml
 #
 # Was der Workflow macht:
-#  1. Prüft täglich, ob es im Original (Card-Forge/forge) neue Commits gibt.
+#  1. Prüft jeden Montag, ob es im Original (Card-Forge/forge) neue Commits gibt.
 #  2. Wenn ja: baut auf einem macOS-Runner eine unsignierte IPA aus dem
 #     aktuellen Upstream-Stand (der Fork selbst muss dafür nicht synchron sein).
 #  3. Macht Forges Datenordner zusätzlich in der iOS-Dateien-App sichtbar
@@ -19,7 +19,7 @@ name: iOS IPA (wöchentlich)
 
 on:
   schedule:
-    - cron: '23 3 * * *'   # Täglich 03:23 UTC
+    - cron: '23 3 * * 1'   # Montags 03:23 UTC
   workflow_dispatch:
     inputs:
       force:
